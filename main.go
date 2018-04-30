@@ -4,13 +4,143 @@ import (
 	"crypto/elliptic"
 	"math/big"
 	"fmt"
-	"github.com/gtank/cryptopasta"
 	"log"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/rand"
 )
+// NewSigningKey generates a random P-256 ECDSA private key.
+func NewSigningKey() (*ecdsa.PrivateKey, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	return key, err
+}
 
-func ecRecovery(data []byte, rawSign []byte) (ecdsa.PublicKey,ecdsa.PublicKey) {
+// Sign signs arbitrary data using ECDSA.
+func Sign(data []byte, privkey *ecdsa.PrivateKey) ([]byte, error) {
+	// hash message
+	digest := sha256.Sum256(data)
+
+	// sign the hash
+	r, s, err := ecdsa.Sign(rand.Reader, privkey, digest[:])
+	if err != nil {
+		return nil, err
+	}
+
+	// encode the signature {R, S}
+	// big.Int.Bytes() will need padding in the case of leading zero bytes
+	params := privkey.Curve.Params()
+	curveOrderByteSize := params.P.BitLen() / 8
+	rBytes, sBytes := r.Bytes(), s.Bytes()
+	signature := make([]byte, curveOrderByteSize*2)
+	copy(signature[curveOrderByteSize-len(rBytes):], rBytes)
+	copy(signature[curveOrderByteSize*2-len(sBytes):], sBytes)
+
+	//privkey.PublicKey.Y
+
+	return signature, nil
+}
+
+// Verify checks a raw ECDSA signature.
+// Returns true if it's valid and false if not.
+func Verify(data, signature []byte, pubkey *ecdsa.PublicKey) bool {
+	// hash message
+	digest := sha256.Sum256(data)
+
+	curveOrderByteSize := pubkey.Curve.Params().P.BitLen() / 8
+
+	r, s := new(big.Int), new(big.Int)
+	r.SetBytes(signature[:curveOrderByteSize])
+	s.SetBytes(signature[curveOrderByteSize:])
+
+	return ecdsa.Verify(pubkey, digest[:], r, s)
+}
+
+// DecompressPubkey parses a public key in the 33-byte compressed format.
+func DecompressPubkey(pubkey []byte) (*ecdsa.PublicKey, error) {
+	x, y := new(big.Int),new(big.Int)
+	if len(pubkey) != 33 {
+		return nil, fmt.Errorf("invalid public key")
+	}
+	if (pubkey[0] != 0x02) && (pubkey[0] != 0x03) {
+		return nil, fmt.Errorf("invalid public key")
+	}
+	if x == nil {
+		return nil, fmt.Errorf("invalid public key")
+	}
+	x.SetBytes(pubkey[1:])
+
+	xxx := new(big.Int).Mul(x,x)
+	xxx.Mul(xxx,x)
+
+	ax := new(big.Int).Mul(big.NewInt(3),x)
+
+	yy := new(big.Int).Sub(xxx, ax)
+	yy.Add(yy,elliptic.P256().Params().B)
+
+	y1 := new(big.Int).ModSqrt(yy,elliptic.P256().Params().P)
+	if y1 == nil {
+		return nil, fmt.Errorf("can not revcovery public key")
+	}
+
+	y2 := new(big.Int).Neg(y1)
+	y2.Mod(y2,elliptic.P256().Params().P)
+
+	if pubkey[0] == 0x02 {
+		if y1.Bit(0) == 0 {
+			y = y1
+		} else {
+			y = y2
+		}
+	} else {
+		if y1.Bit(0) == 1 {
+			y = y1
+		} else {
+			y = y2
+		}
+	}
+	//fmt.Println("dx:",x)
+	//fmt.Println("dy:",y)
+	return &ecdsa.PublicKey{X: x, Y: y, Curve: elliptic.P256()}, nil
+}
+
+// CompressPubkey encodes a public key to the 33-byte compressed format.
+func CompressPubkey(pubkey *ecdsa.PublicKey) []byte {
+	//fmt.Println("cx:",pubkey.X)
+	//fmt.Println("cy:",pubkey.Y)
+	// big.Int.Bytes() will need padding in the case of leading zero bytes
+	params := pubkey.Curve.Params()
+	curveOrderByteSize := params.P.BitLen() / 8
+	xBytes := pubkey.X.Bytes()
+	signature := make([]byte, curveOrderByteSize+1)
+	if pubkey.Y.Bit(0) == 1 {
+		signature[0] = 0x03
+	} else {
+		signature[0] = 0x02
+	}
+	copy(signature[1+curveOrderByteSize-len(xBytes):], xBytes)
+	return signature
+}
+
+func testCompressPublicKey() {
+	fmt.Println("--------------")
+	key, err := NewSigningKey()
+	if err != nil {
+		log.Fatal(err)
+	}
+	compressed := CompressPubkey(&key.PublicKey)
+	uncompressed,err := DecompressPubkey(compressed)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := comparePublicKey(&key.PublicKey,uncompressed)
+	if result != true {
+		log.Fatal("result does not match!")
+	}
+
+}
+
+
+func ecRecovery(data []byte, rawSign []byte) (*ecdsa.PublicKey,*ecdsa.PublicKey, error) {
 	r := big.Int{}
 	s := big.Int{}
 	sigLen := len(rawSign)
@@ -21,20 +151,23 @@ func ecRecovery(data []byte, rawSign []byte) (ecdsa.PublicKey,ecdsa.PublicKey) {
 	rinv := new(big.Int).Exp(&r,expy ,elliptic.P256().Params().N)
 	z := new(big.Int).SetBytes(data)
 
-	tmp1 := new(big.Int).Mul(&r,&r)
-	tmp1.Mul(tmp1,&r)
+	xxx := new(big.Int).Mul(&r,&r)
+	xxx.Mul(xxx,&r)
 
-	tmp2 := new(big.Int).Mul(big.NewInt(3),&r)
+	ax := new(big.Int).Mul(big.NewInt(3),&r)
 
-	tmp4 := new(big.Int).Sub(tmp1,tmp2)
-	tmp4.Add(tmp4,elliptic.P256().Params().B)
+	yy := new(big.Int).Sub(xxx, ax)
+	yy.Add(yy,elliptic.P256().Params().B)
 
 	//y_squard := new(big.Int).Mod(tmp4,elliptic.P256().Params().P)
 
-	y1 := new(big.Int).ModSqrt(tmp4,elliptic.P256().Params().P)
+	y1 := new(big.Int).ModSqrt(yy,elliptic.P256().Params().P)
+	if y1 == nil {
+		return nil, nil, fmt.Errorf("can not revcovery public key")
+	}
+
 	y2 := new(big.Int).Neg(y1)
 	y2.Mod(y2,elliptic.P256().Params().P)
-
 	p1, p2 := elliptic.P256().ScalarMult(&r,y1,s.Bytes())
 	p3, p4 := elliptic.P256().ScalarBaseMult(z.Bytes())
 
@@ -55,10 +188,10 @@ func ecRecovery(data []byte, rawSign []byte) (ecdsa.PublicKey,ecdsa.PublicKey) {
 
 	key1 := ecdsa.PublicKey{Curve:elliptic.P256(),X:q3,Y:q4}
 	key2 := ecdsa.PublicKey{Curve:elliptic.P256(),X:q7,Y:q8}
-	return key1,key2
+	return &key1,&key2, nil
 }
 
-func comparePublicKey(key1, key2 ecdsa.PublicKey) bool {
+func comparePublicKey(key1, key2 *ecdsa.PublicKey) bool {
 	x := key1.X.Cmp(key2.X)
 	y := key2.Y.Cmp(key2.Y)
 	if x == 0 && y == 0 {
@@ -68,37 +201,48 @@ func comparePublicKey(key1, key2 ecdsa.PublicKey) bool {
 	}
 }
 
+
 func testEcRecovery() {
 	fmt.Println("--------------")
-	key, err := cryptopasta.NewSigningKey()
+	key, err := NewSigningKey()
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	data := []byte("hello world.")
-	sign, err := cryptopasta.Sign(data,key)
+	sign, err := Sign(data,key)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	result := cryptopasta.Verify(data,sign,&key.PublicKey)
+	result := Verify(data,sign,&key.PublicKey)
 	if result == false {
 		log.Fatal("verify failed.")
 	}
 
 	hash := sha256.Sum256(data)
 
-	key1,key2 := ecRecovery(hash[:],sign)
-	if comparePublicKey(key.PublicKey,key1) || comparePublicKey(key.PublicKey,key2) {
+	key1,key2,_ := ecRecovery(hash[:],sign)
+	if comparePublicKey(&key.PublicKey,key1) || comparePublicKey(&key.PublicKey,key2) {
 		fmt.Println("match found.")
 	} else {
 		log.Fatal("match not found!!!")
 	}
+	result = Verify(data,sign,key1)
+	if result == false {
+		log.Fatal("key 1 verify failed.")
+	}
+	result = Verify(data,sign,key2)
+	if result == false {
+		log.Fatal("key 2 verify failed.")
+	}
+	fmt.Println("verify ok.")
 }
 
 func main() {
-	for i := 1; i< 1000000 ; i++ {
-		testEcRecovery()
+	for i := 1; i< 100000 ; i++ {
+		//testEcRecovery()
+		testCompressPublicKey()
 		fmt.Println(i)
 	}
 }
